@@ -34,17 +34,8 @@ ArmorDetectorNode::ArmorDetectorNode() : Node("armor_detector_node"), have_camer
     static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "armor_detector");
     Ort::SessionOptions session_options;
     session_options.SetIntraOpNumThreads(1);
-
-    // 尝试启用 CUDA 加速 (针对你的 5060 显卡)
-    try {
-        OrtCUDAProviderOptions cuda_options;
-        cuda_options.device_id = 0; // 使用第一块显卡
-        session_options.AppendExecutionProvider_CUDA(cuda_options);
-        RCLCPP_INFO(this->get_logger(), "成功启用 ONNX Runtime CUDA 加速，模型将运行在 GPU 上");
-    } catch (const std::exception& e) {
-        RCLCPP_WARN(this->get_logger(), "未能启用 CUDA 加速，将回退到 CPU 模式: %s", e.what());
-    }
-
+    
+    // 默认使用 CPU 模式
     ort_session_ = std::make_unique<Ort::Session>(env, model_path.c_str(), session_options);
 
     // 获取输入输出信息（新版 API）
