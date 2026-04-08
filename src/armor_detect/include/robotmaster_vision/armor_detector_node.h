@@ -17,6 +17,7 @@
 #include "robotmaster_vision/kalman_tracker.h"
 #include "robotmaster_vision/pnp_solver.h"
 
+
 class ArmorDetectorNode : public rclcpp::Node
 {
 public:
@@ -56,6 +57,7 @@ private:
     int class_id;
     float confidence;
     std::vector<cv::Point2f> corners;
+    ArmorType type ; // 装甲板大小尺寸补充
   };
 
   std::vector<Armor> run_yolo_inference(const cv::Mat& img);

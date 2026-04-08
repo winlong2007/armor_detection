@@ -149,7 +149,7 @@ void ArmorDetectorNode::image_callback(const sensor_msgs::msg::Image::SharedPtr 
         }
 
         cv::Mat rvec, tvec;
-        if (have_camera_info_ && solve_armor_pnp(img_corners, camera_matrix_, dist_coeffs_, rvec, tvec)) {
+        if (have_camera_info_ && solve_armor_pnp(img_corners, armor.type, camera_matrix_, dist_coeffs_, rvec, tvec)) {
             cv::Point3f cam(tvec.at<double>(0), tvec.at<double>(1), tvec.at<double>(2));
             char coord_text[100];
             sprintf(coord_text, "(%.0f,%.0f,%.0f)mm", cam.x, cam.y, cam.z);
@@ -260,6 +260,10 @@ std::vector<ArmorDetectorNode::Armor> ArmorDetectorNode::run_yolo_inference(cons
         armor.class_id = class_ids[idx];
         armor.confidence = confidences[idx];
         cv::Rect box = boxes[idx];
+        
+        float ratio = (float)box.width / (float)box.height;
+        armor.type = (ratio > 1.5f) ? ArmorType::LARGE : ArmorType::SMALL;
+
         armor.corners = {
             cv::Point2f(box.tl().x, box.tl().y),
             cv::Point2f(box.br().x, box.tl().y),
