@@ -34,8 +34,17 @@ ArmorDetectorNode::ArmorDetectorNode() : Node("armor_detector_node"), have_camer
     static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "armor_detector");
     Ort::SessionOptions session_options;
     session_options.SetIntraOpNumThreads(1);
-    
-    // 默认使用 CPU 模式
+
+    // 尝试启用 CUDA 加速 (针对 5060 显卡)
+    try {
+        OrtCUDAProviderOptions cuda_options;
+        cuda_options.device_id = 0; // 使用第一块显卡
+        session_options.AppendExecutionProvider_CUDA(cuda_options);
+        RCLCPP_INFO(this->get_logger(), "成功启用 ONNX Runtime CUDA 加速，模型将运行在 GPU (RTX 5060) 上");
+    } catch (const std::exception& e) {
+        RCLCPP_WARN(this->get_logger(), "未能启用 CUDA 加速，将回退到 CPU 模式: %s", e.what());
+    }
+
     ort_session_ = std::make_unique<Ort::Session>(env, model_path.c_str(), session_options);
 
     // 获取输入输出信息（新版 API）
@@ -64,14 +73,31 @@ ArmorDetectorNode::ArmorDetectorNode() : Node("armor_detector_node"), have_camer
 
     memory_info_ = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-    // 设置类别名称（根据训练时的类别数修改，这里假设只有一类）
+    // 设置类别名称
     class_names_ = {"armor"};
 
     // 初始化卡尔曼滤波器
     kf_blue_ = init_kalman();
     kf_red_ = init_kalman();
 
-    RCLCPP_INFO(this->get_logger(), "装甲板检测节点已启动");
+    RCLCPP_INFO(this->get_logger(), "装甲板检测 node 启动成功");
+}
+
+RobotIdentity ArmorDetectorNode::get_robot_identity(int class_id)
+{
+    RobotIdentity id;
+    id.team = (class_id < 6) ? "Blue" : "Red";
+    id.number = (class_id % 6) + 1;
+    
+    switch (id.number) {
+        case 1: id.role = "Hero"; break;      // 英雄
+        case 2: id.role = "Engineer"; break;  // 工程
+        case 3: 
+        case 4: id.role = "Infantry"; break;  // 步兵
+        case 6: id.role = "Aerial"; break;    // 空中
+        default: id.role = "Robot"; break;
+    }
+    return id;
 }
 
 void ArmorDetectorNode::camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
@@ -92,13 +118,12 @@ void ArmorDetectorNode::camera_info_callback(const sensor_msgs::msg::CameraInfo:
         cv::initUndistortRectifyMap(camera_matrix_, dist_coeffs_, cv::Mat(),
                                      camera_matrix_, image_size, CV_32FC1, map1_, map2_);
         maps_initialized_ = true;
-        RCLCPP_INFO(this->get_logger(), "相机内参已接收，畸变校正映射已初始化");
+        RCLCPP_INFO(this->get_logger(), "相机内参已接收");
     }
 }
 
 void ArmorDetectorNode::image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
-    // 1. 图像转换
     cv::Mat frame;
     try {
         frame = cv_bridge::toCvShare(msg, "bgr8")->image;
@@ -107,7 +132,6 @@ void ArmorDetectorNode::image_callback(const sensor_msgs::msg::Image::SharedPtr 
         return;
     }
     
-    // 2. 畸变校正
     cv::Mat frame_undistorted;
     if (maps_initialized_) {
         cv::remap(frame, frame_undistorted, map1_, map2_, cv::INTER_LINEAR);
@@ -115,30 +139,29 @@ void ArmorDetectorNode::image_callback(const sensor_msgs::msg::Image::SharedPtr 
         frame_undistorted = frame.clone();
     }
 
-    // 3. 获取相机参数
     float fx = (have_camera_info_) ? camera_matrix_.at<double>(0,0) : this->get_parameter("fx").as_double();
-    float fy = (have_camera_info_) ? camera_matrix_.at<double>(1,1) : this->get_parameter("fy").as_double();
-    float cx = (have_camera_info_) ? camera_matrix_.at<double>(0,2) : msg->width / 2.0f;
-    float cy = (have_camera_info_) ? camera_matrix_.at<double>(1,2) : msg->height / 2.0f;
-
     cv::Mat result = frame_undistorted.clone();
 
-    // 4. YOLO推理（使用 onnxruntime）
+    // 4. YOLO推理
     std::vector<Armor> armors = run_yolo_inference(frame_undistorted);
 
-    // 5. 处理每个检测到的装甲板
-    for (const auto& armor : armors) {
+    for (auto& armor : armors) {
+        // --- 核心身份解析逻辑 ---
+        RobotIdentity id = get_robot_identity(armor.class_id);
+        armor.identity_label = id.team + " " + id.role + " " + std::to_string(id.number);
+        cv::Scalar team_color = (id.team == "Blue") ? cv::Scalar(255, 0, 0) : cv::Scalar(0, 0, 255);
+
+        // 绘制轮廓
         cv::Point2f pts[4];
         armor.rect.points(pts);
-        cv::Scalar color = (armor.class_id == 0) ? cv::Scalar(255,0,0) : cv::Scalar(0,0,255);
         for (int i = 0; i < 4; ++i)
-            cv::line(result, pts[i], pts[(i+1)%4], color, 2);
+            cv::line(result, pts[i], pts[(i+1)%4], team_color, 2);
+        
         cv::Point2f center = armor.rect.center;
-
-        if (armor.class_id >= 1 && armor.class_id <= 5) {
-            cv::putText(result, std::to_string(armor.class_id), cv::Point(center.x-10, center.y-30),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.8, color, 2);
-        }
+        
+        // 绘制标签 (第一行：兵种)
+        cv::putText(result, armor.identity_label, cv::Point(center.x - 60, center.y - 70),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5, team_color, 1);
 
         std::vector<cv::Point2f> img_corners;
         if (!armor.corners.empty()) {
@@ -153,20 +176,19 @@ void ArmorDetectorNode::image_callback(const sensor_msgs::msg::Image::SharedPtr 
             cv::Point3f cam(tvec.at<double>(0), tvec.at<double>(1), tvec.at<double>(2));
             char coord_text[100];
             sprintf(coord_text, "(%.0f,%.0f,%.0f)mm", cam.x, cam.y, cam.z);
-            cv::putText(result, coord_text, cv::Point(center.x-50, center.y-50),
+            // 绘制坐标 (第二行：坐标，保持 30 像素间距)
+            cv::putText(result, coord_text, cv::Point(center.x - 60, center.y - 40),
                         cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0,255,255), 1);
-            float dist = cam.z;
 
-            cv::KalmanFilter& kf = (armor.class_id == 0) ? kf_blue_ : kf_red_;
-            cv::Mat measurement = (cv::Mat_<float>(3,1) << center.x, center.y, dist);
+            cv::KalmanFilter& kf = (id.team == "Blue") ? kf_blue_ : kf_red_;
+            cv::Mat measurement = (cv::Mat_<float>(3,1) << center.x, center.y, (float)cam.z);
             kf.predict();
             kf.correct(measurement);
         } else {
             float dist = calculate_distance(armor.rect, 230, fx);
-            cv::Point3f cam = pixel_to_camera(center.x, center.y, dist, fx, fy, cx, cy);
             char coord_text[100];
-            sprintf(coord_text, "(%.0f,%.0f,%.0f)mm", cam.x, cam.y, cam.z);
-            cv::putText(result, coord_text, cv::Point(center.x-50, center.y-50),
+            sprintf(coord_text, "(dist: %.0f)mm", dist);
+            cv::putText(result, coord_text, cv::Point(center.x - 60, center.y - 40),
                         cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0,255,255), 1);
         }
     }

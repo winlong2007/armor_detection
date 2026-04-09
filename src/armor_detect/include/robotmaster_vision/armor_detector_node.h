@@ -12,11 +12,19 @@
 #include <map>
 #include <onnxruntime_cxx_api.h>
 #include <memory>
+#include <vector>
+#include <string>
 
 #include "robotmaster_vision/geometry_utils.h"
 #include "robotmaster_vision/kalman_tracker.h"
 #include "robotmaster_vision/pnp_solver.h"
 
+// 机器人兵种对应信息结构体 (支撑选项二任务)
+struct RobotIdentity {
+    std::string team;    // 阵营: Blue/Red
+    std::string role;    // 兵种: Hero/Engineer/Infantry/Aerial
+    int number;          // 编号: 1/2/3/4/6
+};
 
 class ArmorDetectorNode : public rclcpp::Node
 {
@@ -26,6 +34,9 @@ public:
 private:
   void image_callback(const sensor_msgs::msg::Image::SharedPtr msg);
   void camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
+
+  // 辅助函数：根据 class_id 获取机器人身份信息
+  RobotIdentity get_robot_identity(int class_id);
 
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_sub_;
@@ -57,7 +68,8 @@ private:
     int class_id;
     float confidence;
     std::vector<cv::Point2f> corners;
-    ArmorType type ; // 装甲板大小尺寸补充
+    ArmorType type; // 补充装甲板大小尺寸
+    std::string identity_label; // 存储解析后的身份信息，如 "Blue Hero 1"
   };
 
   std::vector<Armor> run_yolo_inference(const cv::Mat& img);
