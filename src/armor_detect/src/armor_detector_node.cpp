@@ -35,7 +35,7 @@ ArmorDetectorNode::ArmorDetectorNode() : Node("armor_detector_node"), have_camer
     Ort::SessionOptions session_options;
     session_options.SetIntraOpNumThreads(1);
 
-    // 尝试启用 CUDA 加速 (针对 5060 显卡)
+    // 尝试启用 CUDA 加速 
     try {
         OrtCUDAProviderOptions cuda_options;
         cuda_options.device_id = 0; // 使用第一块显卡
@@ -180,10 +180,31 @@ void ArmorDetectorNode::image_callback(const sensor_msgs::msg::Image::SharedPtr 
             cv::putText(result, coord_text, cv::Point(center.x - 60, center.y - 40),
                         cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0,255,255), 1);
 
+            // --- 轨迹预测与可视化 ---
             cv::KalmanFilter& kf = (id.team == "Blue") ? kf_blue_ : kf_red_;
-            cv::Mat measurement = (cv::Mat_<float>(3,1) << center.x, center.y, (float)cam.z);
+            // 修正：使用 3D 相机坐标进行滤波更新（之前代码中误用了像素坐标）
+            cv::Mat measurement = (cv::Mat_<float>(3,1) << (float)cam.x, (float)cam.y, (float)cam.z);
+            
             kf.predict();
             kf.correct(measurement);
+
+            // 预测未来 15 帧的轨迹
+            std::vector<cv::Point3f> future_3d_pts = predict_future_trajectory(kf, 15);
+            std::vector<cv::Point2f> future_2d_pts;
+            
+            if (!future_3d_pts.empty()) {
+                // 使用相机内参将 3D 轨迹重投影到 2D 像素平面
+                cv::projectPoints(future_3d_pts, cv::Mat::zeros(3,1,CV_64F), cv::Mat::zeros(3,1,CV_64F), 
+                                  camera_matrix_, dist_coeffs_, future_2d_pts);
+                
+                // 绘制预测点和连线
+                for (size_t i = 0; i < future_2d_pts.size(); ++i) {
+                    cv::circle(result, future_2d_pts[i], 2, cv::Scalar(0, 255, 0), -1); // 绿色圆点
+                    if (i > 0) {
+                        cv::line(result, future_2d_pts[i-1], future_2d_pts[i], cv::Scalar(0, 255, 0), 1);
+                    }
+                }
+            }
         } else {
             float dist = calculate_distance(armor.rect, 230, fx);
             char coord_text[100];
